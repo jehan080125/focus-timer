@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+artifacts/
+dist/
+.cache/
+ui-verification-error.txt

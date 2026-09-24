@@ -13,6 +13,7 @@
 #include <cstring>
 #include "GlassVS.h"
 #include "GlassPS.h"
+#include "GlassBlurPS.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Graphics::Capture;
@@ -34,12 +35,15 @@ struct Renderer {
     com_ptr<ID3D11DeviceContext> context;
     IDirect3DDevice winrtDevice{nullptr};
     com_ptr<ID3D11VertexShader> vs;
-    com_ptr<ID3D11PixelShader> ps;
+    com_ptr<ID3D11PixelShader> ps, blurPs;
     com_ptr<ID3D11Buffer> constants;
     com_ptr<ID3D11SamplerState> sampler;
     com_ptr<ID3D11Texture2D> atlas, target, staging;
     com_ptr<ID3D11ShaderResourceView> srv;
     com_ptr<ID3D11RenderTargetView> rtv;
+    com_ptr<ID3D11Texture2D> blurTextures[2];
+    com_ptr<ID3D11ShaderResourceView> blurViews[2];
+    com_ptr<ID3D11RenderTargetView> blurTargets[2];
     std::vector<std::unique_ptr<Output>> outputs;
     int width{}, height{}, padding{32};
     int test{};
@@ -52,6 +56,7 @@ struct Renderer {
         winrtDevice = inspectable.as<IDirect3DDevice>();
         check_hresult(device->CreateVertexShader(GlassVS, sizeof GlassVS, nullptr, vs.put()));
         check_hresult(device->CreatePixelShader(GlassPS, sizeof GlassPS, nullptr, ps.put()));
+        check_hresult(device->CreatePixelShader(GlassBlurPS, sizeof GlassBlurPS, nullptr, blurPs.put()));
         D3D11_BUFFER_DESC buffer{}; buffer.ByteWidth = 32; buffer.Usage = D3D11_USAGE_DEFAULT; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         check_hresult(device->CreateBuffer(&buffer, nullptr, constants.put()));
         D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -62,11 +67,20 @@ struct Renderer {
         if(w == width && h == height) return;
         width = w; height = h;
         srv = nullptr; rtv = nullptr; atlas = nullptr; target = nullptr; staging = nullptr;
+        for(int i=0; i<2; ++i) {
+            blurViews[i] = nullptr; blurTargets[i] = nullptr; blurTextures[i] = nullptr;
+        }
         D3D11_TEXTURE2D_DESC d{}; d.Width = w + padding * 2; d.Height = h + padding * 2;
         d.MipLevels = d.ArraySize = 1; d.Format = DXGI_FORMAT_B8G8R8A8_UNORM; d.SampleDesc.Count = 1;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         check_hresult(device->CreateTexture2D(&d, nullptr, atlas.put()));
         check_hresult(device->CreateShaderResourceView(atlas.get(), nullptr, srv.put()));
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        for(int i=0; i<2; ++i) {
+            check_hresult(device->CreateTexture2D(&d, nullptr, blurTextures[i].put()));
+            check_hresult(device->CreateShaderResourceView(blurTextures[i].get(), nullptr, blurViews[i].put()));
+            check_hresult(device->CreateRenderTargetView(blurTextures[i].get(), nullptr, blurTargets[i].put()));
+        }
         d.Width = w; d.Height = h; d.BindFlags = D3D11_BIND_RENDER_TARGET;
         check_hresult(device->CreateTexture2D(&d, nullptr, target.put()));
         check_hresult(device->CreateRenderTargetView(target.get(), nullptr, rtv.put()));
@@ -127,16 +141,33 @@ struct Renderer {
     }
     void Draw(float dark, float dpi, unsigned char* pixels, int stride) {
         float values[8]{float(width),float(height),float(padding),dark,dpi};
-        context->UpdateSubresource(constants.get(),0,nullptr,values,0,0);
         ID3D11Buffer* cb = constants.get(); context->PSSetConstantBuffers(0,1,&cb);
-        ID3D11ShaderResourceView* view = srv.get(); context->PSSetShaderResources(0,1,&view);
         ID3D11SamplerState* s = sampler.get(); context->PSSetSamplers(0,1,&s);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.get(),nullptr,0);
+        context->PSSetShader(blurPs.get(),nullptr,0);
+        D3D11_VIEWPORT blurViewport{0,0,float(width+2*padding),float(height+2*padding),0,1};
+        context->RSSetViewports(1,&blurViewport);
+        ID3D11ShaderResourceView* emptyViews[2]{};
+        for(int pass=0; pass<2; ++pass) {
+            values[5] = pass == 0 ? 1.f : 0.f;
+            values[6] = pass == 1 ? 1.f : 0.f;
+            context->UpdateSubresource(constants.get(),0,nullptr,values,0,0);
+            ID3D11ShaderResourceView* source = pass == 0 ? srv.get() : blurViews[0].get();
+            context->PSSetShaderResources(0,1,&source);
+            ID3D11RenderTargetView* destination = blurTargets[pass].get();
+            context->OMSetRenderTargets(1,&destination,nullptr);
+            context->Draw(3,0);
+            context->PSSetShaderResources(0,2,emptyViews);
+            context->OMSetRenderTargets(0,nullptr,nullptr);
+        }
+        ID3D11ShaderResourceView* views[]{srv.get(),blurViews[1].get()};
+        context->PSSetShaderResources(0,2,views);
         ID3D11RenderTargetView* renderTarget = rtv.get(); context->OMSetRenderTargets(1,&renderTarget,nullptr);
         D3D11_VIEWPORT viewport{0,0,float(width),float(height),0,1}; context->RSSetViewports(1,&viewport);
-        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context->VSSetShader(vs.get(),nullptr,0); context->PSSetShader(ps.get(),nullptr,0);
+        context->PSSetShader(ps.get(),nullptr,0);
         context->Draw(3,0);
-        view = nullptr; context->PSSetShaderResources(0,1,&view);
+        context->PSSetShaderResources(0,2,emptyViews);
         context->OMSetRenderTargets(0,nullptr,nullptr);
         context->CopyResource(staging.get(),target.get());
         D3D11_MAPPED_SUBRESOURCE mapped{}; check_hresult(context->Map(staging.get(),0,D3D11_MAP_READ,0,&mapped));

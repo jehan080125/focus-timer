@@ -14,6 +14,8 @@ fxc /nologo /T vs_5_0 /E VS /Vn GlassVS /Fh GlassVS.h ..\Glass.hlsl
 if errorlevel 1 exit /b 1
 fxc /nologo /T ps_5_0 /E PS /Vn GlassPS /Fh GlassPS.h ..\Glass.hlsl
 if errorlevel 1 exit /b 1
+fxc /nologo /T ps_5_0 /E BlurPS /Vn GlassBlurPS /Fh GlassBlurPS.h ..\Glass.hlsl
+if errorlevel 1 exit /b 1
 cl /nologo /LD /O2 /MT /EHsc /std:c++20 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I. ..\Glass.cpp /link /OUT:FocusTimer.Glass.dll d3d11.lib dxgi.lib windowsapp.lib user32.lib
 "@
 $script = Join-Path $nativeOut 'compile.cmd'
